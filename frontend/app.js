@@ -172,6 +172,7 @@ async function runObservation(statusUrl, controller, generation) {
     !controller.signal.aborted;
 
   let initialSnapshot = true;
+  let inFlight = null;
 
   try {
     while (isCurrent()) {
@@ -197,6 +198,13 @@ async function runObservation(statusUrl, controller, generation) {
           pollingCount: getState().metrics.pollingCount + 1,
         },
       });
+      inFlight = {
+        request_number: getState().metrics.pollingCount,
+        mode,
+        request_started_at: Date.now(),
+        url: requestUrl,
+      };
+      logObservation("request_started", inFlight);
 
       const jobData = await DataService.fetchJobStatus(
         requestUrl,
@@ -210,6 +218,13 @@ async function runObservation(statusUrl, controller, generation) {
       // 204 is a normal holding-deadline result: retain the last version and
       // immediately issue the next long poll without attempting JSON parsing.
       if (jobData === null) {
+        logObservation("response_received", {
+          ...inFlight,
+          response_received_at: responseObservedAt,
+          http_status: 204,
+          received_version: null,
+        });
+        inFlight = null;
         initialSnapshot = false;
         continue;
       }
@@ -226,11 +241,20 @@ async function runObservation(statusUrl, controller, generation) {
       }
 
       const mergedJob = { ...jobData, status_url: statusUrl };
+      const renderStartedAt = performance.now();
       setState({
         activeJob: mergedJob,
         lastObservedVersion: jobData.version,
         variants: jobData.variants || [],
       });
+      logObservation("response_received", {
+        ...inFlight,
+        response_received_at: responseObservedAt,
+        http_status: 200,
+        received_version: jobData.version,
+        rendering_ms: performance.now() - renderStartedAt,
+      });
+      inFlight = null;
 
       initialSnapshot = false;
       if (isTerminal(jobData.status)) {
@@ -246,10 +270,27 @@ async function runObservation(statusUrl, controller, generation) {
       }
     }
   } catch (error) {
+    if (inFlight !== null) {
+      logObservation(
+        error.name === "AbortError" ? "request_cancelled" : "request_error",
+        {
+          ...inFlight,
+          response_received_at: Date.now(),
+          error: error.message,
+        },
+      );
+    }
     if (!isCurrent() || error.name === "AbortError") return;
     stopObservation();
     setState({ observationError: true });
   }
+}
+
+function logObservation(event, details) {
+  console.info(
+    "IMAGELAB_OBSERVATION",
+    JSON.stringify({ event, ...details }),
+  );
 }
 
 function delay(ms, signal, onTimer) {
