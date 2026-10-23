@@ -11,14 +11,14 @@ import (
 	"time"
 )
 
-
 func (app *application) serve() error {
-srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", app.config.port),
-		Handler:      app.routes(),
-		IdleTimeout:  time.Minute,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+	srv := &http.Server{
+		Addr:        fmt.Sprintf(":%d", app.config.port),
+		Handler:     app.routes(),
+		IdleTimeout: time.Minute,
+		ReadTimeout: 5 * time.Second,
+		// Long polls may hold for 20 seconds before writing a response.
+		WriteTimeout: 25 * time.Second,
 	}
 
 	shutdownError := make(chan error)
@@ -36,7 +36,7 @@ srv := &http.Server{
 		err := srv.Shutdown(ctx)
 		if err != nil {
 			shutdownError <- err
-			return 
+			return
 		}
 
 		app.logger.Info("completing background tasks", "addr", srv.Addr)

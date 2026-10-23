@@ -32,6 +32,7 @@ type application struct {
 	models       data.Models
 	wg           sync.WaitGroup
 	workerCancel context.CancelFunc
+	observers    *observationHub
 }
 
 func main() {
@@ -68,9 +69,10 @@ func main() {
 	logger.Info("database connection pool established")
 
 	app := &application{
-		config: cfg,
-		logger: logger,
-		models: data.NewModels(db),
+		config:    cfg,
+		logger:    logger,
+		models:    data.NewModels(db),
+		observers: newObservationHub(),
 	}
 
 	workerCtx, cancelWorker := context.WithCancel(context.Background())

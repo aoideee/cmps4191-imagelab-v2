@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/lewisdalwin/gatekeeper/internal/data"
 )
@@ -206,26 +208,138 @@ func (app *application) uploadImageHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func (app *application) getJobHandler(w http.ResponseWriter, r *http.Request) {
-	job, err := app.models.Jobs.GetByPublicID(r.PathValue("id"))
+	w.Header().Set("Cache-Control", "no-store")
+
+	after, wait, longPolling, err := parseObservationQuery(r)
 	if err != nil {
-		if errors.Is(err, data.ErrRecordNotFound) {
-			app.notFoundResponse(w, r)
-			return
-		}
-		app.serverErrorResponse(w, r, err)
+		app.badRequestResponse(w, r, err)
 		return
 	}
 
+	if !longPolling {
+		job, err := app.models.Jobs.GetByPublicID(r.PathValue("id"))
+		if err != nil {
+			app.writeJobLookupError(w, r, err)
+			return
+		}
+		app.writeJobSnapshot(w, r, job)
+		return
+	}
+
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+
+	jobID := r.PathValue("id")
+	for {
+		// Capture the signal before reading PostgreSQL. A commit between the
+		// read and wait closes this channel, so the change cannot be missed.
+		subscription := app.observers.subscribe(jobID)
+		job, err := app.models.Jobs.GetByPublicID(jobID)
+		if err != nil {
+			subscription.release()
+			app.writeJobLookupError(w, r, err)
+			return
+		}
+
+		if after > job.Version {
+			subscription.release()
+			app.badRequestResponse(w, r, fmt.Errorf(
+				"after cannot exceed the current job version",
+			))
+			return
+		}
+
+		if job.Status == "completed" || job.Status == "failed" || job.Version > after {
+			subscription.release()
+			app.writeJobSnapshot(w, r, job)
+			return
+		}
+
+		select {
+		case <-r.Context().Done():
+			subscription.release()
+			return
+		case <-subscription.C:
+			subscription.release()
+			// A notification is only a hint; loop and read PostgreSQL again.
+		case <-deadline.C:
+			subscription.release()
+
+			// Recheck authoritative state before deciding that nothing changed.
+			job, err := app.models.Jobs.GetByPublicID(jobID)
+			if err != nil {
+				app.writeJobLookupError(w, r, err)
+				return
+			}
+			if job.Status == "completed" || job.Status == "failed" || job.Version > after {
+				app.writeJobSnapshot(w, r, job)
+				return
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+}
+
+func parseObservationQuery(r *http.Request) (int64, time.Duration, bool, error) {
+	query := r.URL.Query()
+	for key := range query {
+		if key != "after" && key != "wait" {
+			return 0, 0, false, fmt.Errorf("unknown observation parameter %q", key)
+		}
+		if len(query[key]) != 1 {
+			return 0, 0, false, fmt.Errorf("observation parameter %q must appear once", key)
+		}
+	}
+
+	afterText, hasAfter := query["after"]
+	waitText, hasWait := query["wait"]
+	if !hasAfter {
+		if hasWait {
+			return 0, 0, false, fmt.Errorf("wait requires after")
+		}
+		return 0, 0, false, nil
+	}
+
+	after, err := strconv.ParseInt(afterText[0], 10, 64)
+	if err != nil || after < 0 {
+		return 0, 0, false, fmt.Errorf("after must be a nonnegative integer")
+	}
+
+	waitSeconds := int64(20)
+	if hasWait {
+		waitSeconds, err = strconv.ParseInt(waitText[0], 10, 64)
+		if err != nil || waitSeconds < 1 || waitSeconds > 20 {
+			return 0, 0, false, fmt.Errorf("wait must be an integer from 1 to 20")
+		}
+	}
+
+	return after, time.Duration(waitSeconds) * time.Second, true, nil
+}
+
+func (app *application) writeJobLookupError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, data.ErrRecordNotFound) {
+		app.notFoundResponse(w, r)
+		return
+	}
+	app.serverErrorResponse(w, r, err)
+}
+
+func (app *application) writeJobSnapshot(w http.ResponseWriter, r *http.Request, job *data.Job) {
 	response := envelope{
-		"id":            job.PublicID,
-		"image_id":      job.ImageID,
-		"status":        job.Status,
-		"variants":      job.Variants,
-		"queued_at":     job.QueuedAt,
-		"started_at":    job.StartedAt,
-		"completed_at":  job.CompletedAt,
-		"failed_at":     job.FailedAt,
-		"error_message": job.ErrorMessage,
+		"id":                 job.PublicID,
+		"image_id":           job.ImageID,
+		"status":             job.Status,
+		"version":            job.Version,
+		"stage":              job.Stage,
+		"variants_completed": job.VariantsCompleted,
+		"variants":           job.Variants,
+		"queued_at":          job.QueuedAt,
+		"started_at":         job.StartedAt,
+		"completed_at":       job.CompletedAt,
+		"failed_at":          job.FailedAt,
+		"error_message":      job.ErrorMessage,
 	}
 
 	if err := app.writeJSON(w, http.StatusOK, response, nil); err != nil {
