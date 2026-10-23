@@ -55,6 +55,7 @@ test("a successful status response is returned normally", async (t) => {
 	version: 3,
 	stage: "thumbnail_ready",
 	variants_completed: 1,
+	simulation_step: 0,
   };
 
   t.mock.method(globalThis, "fetch", async () => ({
@@ -81,6 +82,7 @@ function completedJob() {
 	version: 5,
 	stage: "display_ready",
 	variants_completed: 3,
+	simulation_step: 0,
     variants: [
       {
         name: "thumbnail",

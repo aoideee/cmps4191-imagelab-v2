@@ -31,6 +31,7 @@ type Job struct {
 	Version           int64           `json:"version"`
 	Stage             string          `json:"stage"`
 	VariantsCompleted int             `json:"variants_completed"`
+	SimulationStep    int             `json:"simulation_step"`
 	Payload           json.RawMessage `json:"payload,omitempty"`
 	Result            json.RawMessage `json:"result,omitempty"`
 	Variants          []Variant       `json:"variants,omitempty"` // Automatically populated on completion
@@ -51,14 +52,14 @@ func (m JobModel) Insert(job *Job) error {
 		INSERT INTO jobs (image_id, job_type, payload, status)
 		VALUES ($1, $2, COALESCE($3, '{}'::jsonb), 'queued')
 		RETURNING id, public_id, status, version, stage,
-		          variants_completed, created_at`
+		          variants_completed, simulation_step, created_at`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	err := m.DB.QueryRowContext(ctx, query, job.ImageID, job.JobType, job.Payload).Scan(
 		&job.ID, &job.PublicID, &job.Status, &job.Version, &job.Stage,
-		&job.VariantsCompleted, &job.QueuedAt,
+		&job.VariantsCompleted, &job.SimulationStep, &job.QueuedAt,
 	)
 	if err != nil {
 		var pgErr *pq.Error
@@ -101,9 +102,16 @@ func (m JobModel) ClaimNext(ctx context.Context, jobType string) (*Job, error) {
 		    started_at = now(),
 		    version = version + 1
 		WHERE id = $1
-		RETURNING started_at, version, stage, variants_completed`,
+		RETURNING started_at, version, stage, variants_completed,
+		          simulation_step`,
 		job.ID,
-	).Scan(&job.StartedAt, &job.Version, &job.Stage, &job.VariantsCompleted); err != nil {
+	).Scan(
+		&job.StartedAt,
+		&job.Version,
+		&job.Stage,
+		&job.VariantsCompleted,
+		&job.SimulationStep,
+	); err != nil {
 		return nil, err
 	}
 
@@ -121,7 +129,7 @@ func (m JobModel) GetByPublicID(publicID string) (*Job, error) {
 		SELECT id, public_id, image_id, job_type, status,
 		       COALESCE(payload, 'null'::jsonb),
 		       COALESCE(result, 'null'::jsonb),
-		       error_message, version, stage, variants_completed,
+		       error_message, version, stage, variants_completed, simulation_step,
 		       started_at, completed_at, failed_at, created_at
 		FROM jobs WHERE public_id = $1`
 
@@ -132,7 +140,7 @@ func (m JobModel) GetByPublicID(publicID string) (*Job, error) {
 	err := m.DB.QueryRowContext(ctx, query, publicID).Scan(
 		&job.ID, &job.PublicID, &job.ImageID, &job.JobType, &job.Status,
 		&job.Payload, &job.Result, &job.ErrorMessage,
-		&job.Version, &job.Stage, &job.VariantsCompleted,
+		&job.Version, &job.Stage, &job.VariantsCompleted, &job.SimulationStep,
 		&job.StartedAt, &job.CompletedAt, &job.FailedAt, &job.QueuedAt,
 	)
 	if err != nil {
@@ -153,6 +161,23 @@ func (m JobModel) GetByPublicID(publicID string) (*Job, error) {
 	}
 
 	return &job, nil
+}
+
+func (m JobModel) RecordSimulationStep(
+	ctx context.Context,
+	id string,
+	step int,
+) (int64, error) {
+	var version int64
+	err := m.DB.QueryRowContext(ctx, `
+		UPDATE jobs
+		SET simulation_step = $2,
+		    version = version + 1
+		WHERE id = $1 AND status = 'processing'
+		RETURNING version`,
+		id, step,
+	).Scan(&version)
+	return version, err
 }
 
 func (m JobModel) MarkFailed(ctx context.Context, id, message string) error {

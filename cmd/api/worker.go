@@ -73,6 +73,16 @@ func (app *application) processNextImageJob(ctx context.Context) error {
 		}
 	}
 
+	if err := app.runSimulationPhase(ctx, job); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		if failErr := app.failJob(ctx, job, "Failed to record simulated progress"); failErr != nil {
+			return fmt.Errorf("simulation failed: %v; recording failure also failed: %w", err, failErr)
+		}
+		return err
+	}
+
 	img, err := app.models.Images.Get(job.ImageID)
 	if err != nil {
 		app.logger.Error("failed to load image record", "error", err, "job_id", job.PublicID)
@@ -122,6 +132,49 @@ func (app *application) processNextImageJob(ctx context.Context) error {
 
 	app.logger.Info("image processing job completed", "job_id", job.PublicID)
 	return nil
+}
+
+func (app *application) runSimulationPhase(ctx context.Context, job *data.Job) error {
+	interval := app.config.simulationInterval
+	duration := app.config.simulationDuration
+	if interval <= 0 {
+		return nil
+	}
+	if duration <= 0 {
+		return errors.New("simulation duration must be positive")
+	}
+
+	ticker := time.NewTicker(interval)
+	deadline := time.NewTimer(duration)
+	defer ticker.Stop()
+	defer deadline.Stop()
+
+	step := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return nil
+		case <-ticker.C:
+			step++
+			version, err := app.models.Jobs.RecordSimulationStep(ctx, job.ID, step)
+			if err != nil {
+				return err
+			}
+			app.logger.Info(
+				"image job change committed",
+				"job_id", job.PublicID,
+				"version", version,
+				"status", "processing",
+				"stage", "starting",
+				"simulation_step", step,
+				"variants_completed", 0,
+				"committed_at", time.Now().UTC().Format(time.RFC3339Nano),
+			)
+			app.notifyJobObservers(job.PublicID)
+		}
+	}
 }
 
 // loadAndDecodeImage opens the original file from the upload directory and decodes its header.

@@ -17,6 +17,8 @@ type config struct {
 	port               int
 	env                string
 	jobDelay           time.Duration
+	simulationInterval time.Duration
+	simulationDuration time.Duration
 	workerPollInterval time.Duration
 	db                 struct {
 		dsn          string
@@ -41,8 +43,10 @@ func main() {
 	var legacyDelay time.Duration
 	flag.IntVar(&cfg.port, "port", 4000, "API server port")
 	flag.StringVar(&cfg.env, "env", "development", "Environment (development|staging|production)")
-	flag.DurationVar(&cfg.jobDelay, "job-delay", 7*time.Second, "Artificial job processing delay inside the worker")
+	flag.DurationVar(&cfg.jobDelay, "job-delay", 0, "Quiet delay before processing (use 30s for condition A)")
 	flag.DurationVar(&legacyDelay, "report-delay", 0, "Legacy alias for -job-delay")
+	flag.DurationVar(&cfg.simulationInterval, "simulation-interval", 0, "Simulated update interval; zero disables simulation")
+	flag.DurationVar(&cfg.simulationDuration, "simulation-duration", 10*time.Second, "Duration of the simulated update phase")
 	flag.DurationVar(&cfg.workerPollInterval, "worker-poll-interval", 250*time.Millisecond, "Worker queue-check interval")
 
 	flag.StringVar(&cfg.db.dsn, "db-dsn", "", "PostgreSQL DSN")
@@ -74,6 +78,12 @@ func main() {
 		models:    data.NewModels(db),
 		observers: newObservationHub(),
 	}
+	logger.Info(
+		"experiment configuration",
+		"quiet_delay", cfg.jobDelay,
+		"simulation_interval", cfg.simulationInterval,
+		"simulation_duration", cfg.simulationDuration,
+	)
 
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	app.workerCancel = cancelWorker

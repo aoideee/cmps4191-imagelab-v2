@@ -30,6 +30,13 @@ func TestWorkerVariantsIntegration(t *testing.T) {
 
 	for _, scenario := range []string{"success", "third insert fails"} {
 		t.Run(scenario, func(t *testing.T) {
+			app.config.simulationInterval = 0
+			app.config.simulationDuration = 0
+			if scenario == "success" {
+				app.config.simulationInterval = 10 * time.Millisecond
+				app.config.simulationDuration = 35 * time.Millisecond
+			}
+
 			// Clear records from the previous scenario in the temporary database.
 			if _, err := db.Exec(
 				"TRUNCATE image_variants, jobs, images",
@@ -150,7 +157,11 @@ func TestWorkerVariantsIntegration(t *testing.T) {
 			if count != 3 || len(savedJob.Variants) != 3 {
 				t.Fatal("expected three database records and three results")
 			}
-			if savedJob.Version != 5 || savedJob.VariantsCompleted != 3 ||
+			if savedJob.SimulationStep < 1 {
+				t.Fatal("expected enabled simulation to publish progress")
+			}
+			wantVersion := int64(5 + savedJob.SimulationStep)
+			if savedJob.Version != wantVersion || savedJob.VariantsCompleted != 3 ||
 				savedJob.Stage != "display_ready" {
 				t.Fatal("expected claim and three versioned progress milestones")
 			}

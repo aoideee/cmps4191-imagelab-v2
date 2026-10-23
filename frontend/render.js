@@ -100,6 +100,7 @@ emitter.on("stateChanged", (state) => {
   const jobVersion = document.getElementById("job-version");
   const jobStage = document.getElementById("job-stage");
   const jobProgress = document.getElementById("job-progress");
+	const simulatedProgress = document.getElementById("simulated-progress");
 
   const modeText =
     state.observationMode === "long"
@@ -111,6 +112,9 @@ emitter.on("stateChanged", (state) => {
   jobStage.textContent =
     state.activeJob?.stage?.replaceAll("_", " ") ?? "--";
   jobProgress.textContent = `${state.activeJob?.variants_completed ?? 0} / 3`;
+	const simulationStep = state.activeJob?.simulation_step ?? 0;
+	simulatedProgress.textContent = String(simulationStep);
+	simulatedProgress.parentElement.classList.toggle("hidden", simulationStep === 0);
 
   // Render Immediate Upload Error Banner (VAL-05)
   if (state.uploadError) {

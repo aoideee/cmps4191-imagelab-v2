@@ -140,6 +140,10 @@ export const DataService = {
         throw new Error("Status response has invalid variant progress");
       }
 
+	  if (!Number.isInteger(data.simulation_step) || data.simulation_step < 0) {
+		throw new Error("Status response has invalid simulated progress");
+	  }
+
             if (data.status === "completed") {
               if (!hasText(data.image_id)) {
                 throw new Error("Completed response is missing an image ID");
