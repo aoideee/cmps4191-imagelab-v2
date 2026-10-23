@@ -2,13 +2,15 @@
 
 ImageLab is an asynchronous image-processing web application built with Go, PostgreSQL, and a vanilla JavaScript frontend.
 
-Work is accepted durably via `202 Accepted`, processed independently by an in-process background worker, and observed by the browser through automatic short polling.
+Work is accepted durably via `202 Accepted`, processed independently by an in-process background worker, and observed through selectable short or version-based long polling.
+
+Assessment 1 baseline: commit `663928a`. Assessment 2 development starts after that commit.
 
 ---
 
 ## Core Architecture
 
-1. **Browser (Client)**: Selects, previews locally, submits the image once (with double-click protection), and polls for job status.
+1. **Browser (Client)**: Selects, previews locally, submits the image once, and observes the durable job using either short or long polling.
 2. **Go HTTP API**: Validates request and MIME types, stores original image files using server-controlled names, creates durable job records in PostgreSQL, and immediately acknowledges receipt with `202 Accepted`.
 3. **PostgreSQL**: Authoritative store for images, job lifecycles (`queued` → `processing` → `completed` / `failed`), timestamps, and variant metadata.
 4. **Background Worker**: Independently claims queued jobs using `FOR UPDATE SKIP LOCKED`, generates image variants, persists variant metadata, and updates job completion.
@@ -109,7 +111,7 @@ Content-Type: application/json
 }
 ```
 
-### 2. Job Status Query (`GET /v1/jobs/{job_id}`)
+### 2. Prompt Job Snapshot (`GET /v1/jobs/{job_id}`)
 
 Returns the current job state, timestamps, and completed variant metadata:
 
@@ -118,6 +120,10 @@ Returns the current job state, timestamps, and completed variant metadata:
   "id": "01917f90-1234-7000-8000-000000000001",
   "image_id": "01a0e95a-3207-705b-a826-8448e74b75ea",
   "status": "completed",
+  "version": 5,
+  "stage": "display_ready",
+  "variants_completed": 3,
+  "simulation_step": 0,
   "queued_at": "2026-09-08T13:00:00Z",
   "started_at": "2026-09-08T13:00:01Z",
   "completed_at": "2026-09-08T13:00:03Z",
@@ -143,6 +149,16 @@ Returns the current job state, timestamps, and completed variant metadata:
   ]
 }
 ```
+
+### 3. Long-Poll Observation (`GET /v1/jobs/{job_id}?after=4&wait=20`)
+
+- `after` is a nonnegative version. Supplying it enables long polling.
+- `wait` is an integer from 1 to 20 seconds and defaults to 20.
+- A newer snapshot or terminal job returns `200` immediately.
+- An unchanged active job is held until a committed change or the deadline.
+- An unchanged deadline returns `204 No Content`; this is not an error.
+- `wait` without `after`, malformed values, and `after` ahead of the server return `400`.
+- Observation responses use `Cache-Control: no-store`.
 
 ---
 
@@ -217,24 +233,56 @@ separately using the acceptance evidence.
 
 ## Worker and measurement settings
 
-By default, one worker checks for queued jobs every 250 ms and applies
-an intentional seven-second delay before processing the original.
-
-The delay makes background processing observable during demonstrations.
-Recorded processing durations include it.
+By default, one worker checks for queued jobs every 250 ms. Experimental
+quiet delay and simulated progress are disabled for ordinary use.
 
 To run with a different delay:
 
 ```bash
-go run ./cmd/api -db-dsn="$GATEKEEPER_DB_DSN" -job-delay=7s
+go run ./cmd/api -db-dsn="$GATEKEEPER_DB_DSN"
 ```
 
-Browser polling waits approximately one second after each successful
-active-state response before making the next request. Polling stops on
-completion, processing failure, or a retrieval error.
+Choose **Short polling** or **Long polling** before submission. Changing the
+mode during an active job cancels the old observation only, fetches a fresh
+prompt snapshot, and continues with the same job. Short polling waits about
+one second after each active response. Long polling immediately continues
+after a newer `200` or normal `204`. Both modes stop on terminal state or a
+genuine retrieval error.
 
 After a retrieval error, Try again observes the same job without
 resubmitting the image.
+
+## Assessment 2 experiment controls
+
+The worker logs the active configuration at startup. All controls are off by
+default except the 10-second phase duration, which has no effect until an
+interval is supplied.
+
+```bash
+# A: 30-second quiet job, no intermediate simulated updates
+go run ./cmd/api -db-dsn="$GATEKEEPER_DB_DSN" -job-delay=30s
+
+# C1: 10-second simulated phase, update every 2 seconds
+go run ./cmd/api -db-dsn="$GATEKEEPER_DB_DSN" \
+  -simulation-interval=2s -simulation-duration=10s
+
+# C2/C3: 10-second simulated phase, update every 200 ms
+go run ./cmd/api -db-dsn="$GATEKEEPER_DB_DSN" \
+  -simulation-interval=200ms -simulation-duration=10s
+```
+
+Simulation completes before real image transformations. It updates the
+separate `simulation_step` field and job version; it never changes
+`variants_completed`. The UI labels it **Simulated progress**. Real variant
+commits advance `thumbnail_ready`, `preview_ready`, and `display_ready`.
+
+The browser console emits one-line `IMAGELAB_OBSERVATION` JSON records for
+request starts, `200`/`204` receipts, cancellations, errors, received versions,
+and rendering time. Server logs record each committed version and its actual
+post-commit wall-clock timestamp.
+
+See [Assessment 2 handoff](docs/assessment-2-handoff.md) for the deliberately
+uncompleted experiment, analysis, chart, report, and video work.
 
 ## Assessment documentation
 
@@ -251,7 +299,8 @@ Selecting another image cancels browser observation, not server work.
 Frontend submission protection does not prevent duplicate requests
 across different tabs or clients.
 
-The application uses local file storage, one in-process worker, and
-short polling. Server push and automatic retries are not implemented.
+The application uses local file storage, one in-process worker, and selectable
+short or long polling. Server push and automatic retries after genuine
+retrieval failures are not implemented.
 
 Keep `.envrc` and uploaded/generated image files out of version control.

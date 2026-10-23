@@ -1,0 +1,1 @@
+run_id,condition,mode,repetition,job_id,image,latency_setting,baseline_version,terminal_version,requests_started,initial_200,newer_200,unchanged_200,no_change_204,retrieval_errors,cancellations,distinct_new_versions_seen,processing_ms,detection_ms,observation_db_reads,notes
