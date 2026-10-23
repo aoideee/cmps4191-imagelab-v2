@@ -2,25 +2,33 @@ import { getState, setState } from "./state.js";
 import { DataService } from "./modules/data-service.js";
 import { buildMeasurement } from "./modules/measurements.js";
 
-// Elements
 const fileInput = document.getElementById("file-input");
 const chooseImageBtn = document.getElementById("choose-image-btn");
 const processBtn = document.getElementById("process-btn");
 const tryAgainBtn = document.getElementById("try-again-btn");
+const modeInputs = document.querySelectorAll('input[name="observation-mode"]');
 
-// 1. Cancel observation if the browser tab or page is closed/refreshed (POLL-06)
-window.addEventListener("beforeunload", () => {
-  stopPolling();
-});
-
-// Track selections so an older image check cannot replace a newer one.
 let selectionVersion = 0;
+let observationGeneration = 0;
 
-// Preview Image Selection (UI-05, UI-06)
-fileInput.addEventListener("change", async (e) => {
+window.addEventListener("beforeunload", stopObservation);
+
+for (const input of modeInputs) {
+  input.addEventListener("change", () => {
+    if (!input.checked) return;
+
+    setState({ observationMode: input.value });
+    const { activeJob } = getState();
+    if (activeJob?.status_url && !isTerminal(activeJob.status)) {
+      startObservation(activeJob.status_url);
+    }
+  });
+}
+
+fileInput.addEventListener("change", async (event) => {
   if (getState().isSubmitting) return;
 
-  const file = e.target.files[0];
+  const file = event.target.files[0];
   if (!file) return;
 
   const thisSelection = ++selectionVersion;
@@ -28,7 +36,6 @@ fileInput.addEventListener("change", async (e) => {
   const allowedTypes = ["image/jpeg", "image/png"];
 
   let error = null;
-
   if (file.size === 0) {
     error = "This file is empty. Choose a JPEG or PNG image.";
   } else if (!allowedTypes.includes(file.type)) {
@@ -39,32 +46,20 @@ fileInput.addEventListener("change", async (e) => {
 
   if (error) {
     fileInput.value = "";
-    setState({
-      selectedFile: null,
-      isValidating: false,
-      uploadError: error,
-    });
+    setState({ selectedFile: null, isValidating: false, uploadError: error });
     return;
   }
 
-  setState({
-    selectedFile: null,
-    isValidating: true,
-    uploadError: null,
-  });
-
+  setState({ selectedFile: null, isValidating: true, uploadError: null });
   let checkUrl = null;
 
   try {
     checkUrl = URL.createObjectURL(file);
-
     const imageCheck = new Image();
     imageCheck.src = checkUrl;
     await imageCheck.decode();
   } catch {
-    // Ignore a result belonging to an older selection.
     if (thisSelection !== selectionVersion) return;
-
     fileInput.value = "";
     setState({
       selectedFile: null,
@@ -74,63 +69,53 @@ fileInput.addEventListener("change", async (e) => {
     });
     return;
   } finally {
-    if (checkUrl !== null) {
-      URL.revokeObjectURL(checkUrl);
-    }
+    if (checkUrl !== null) URL.revokeObjectURL(checkUrl);
   }
 
   if (thisSelection !== selectionVersion) return;
 
-  // Only a readable new selection replaces the previous observation.
-  stopPolling();
-
+  stopObservation();
   setState({
     selectedFile: file,
     isValidating: false,
     uploadError: null,
     activeJob: null,
     variants: [],
+    lastObservedVersion: null,
     observationError: false,
-    metrics: {
-      requestStart: null,
-      ackLatency: null,
-      pollingCount: 0,
-      completionObservedAt: null,
-    },
+    metrics: freshMetrics(),
   });
 });
 
-// Primary Upload Submission Handler (SUB-01, SUB-02)
 processBtn.addEventListener("click", async () => {
   const { isSubmitting, isValidating, selectedFile, activeJob } = getState();
-  const isJobActive =
-    activeJob &&
-    (activeJob.status === "queued" || activeJob.status === "processing");
-  if (isSubmitting || isValidating || !selectedFile || isJobActive) return;
+  if (
+    isSubmitting ||
+    isValidating ||
+    !selectedFile ||
+    (activeJob && !isTerminal(activeJob.status))
+  ) {
+    return;
+  }
 
-  // Clean up any stale polling before initiating a new job
-  stopPolling();
-
+  stopObservation();
   const requestStart = performance.now();
   setState({ isSubmitting: true, uploadError: null, observationError: false });
 
   try {
-    const data = await DataService.uploadImage(selectedFile);
-    const ackLatency = performance.now() - requestStart; // Measure Ack Latency
-
+    const accepted = await DataService.uploadImage(selectedFile);
     setState({
-      activeJob: data,
+      activeJob: accepted,
+      lastObservedVersion: null,
       metrics: {
+        ...freshMetrics(),
         requestStart,
-        ackLatency,
-        pollingCount: 0,
-        completionObservedAt: null,
+        ackLatency: performance.now() - requestStart,
       },
     });
-
-    startPolling(data.status_url); // POLL-01
-  } catch (err) {
-    setState({ uploadError: err.message || "Submission error" });
+    startObservation(accepted.status_url);
+  } catch (error) {
+    setState({ uploadError: error.message || "Submission error" });
   } finally {
     setState({ isSubmitting: false });
   }
@@ -138,128 +123,148 @@ processBtn.addEventListener("click", async () => {
 
 chooseImageBtn.addEventListener("click", () => {
   if (getState().isSubmitting) return;
-
-  // Allow selecting the same file again.
   fileInput.value = "";
   fileInput.click();
 });
 
-// Polling Control Loop (POLL-02 to POLL-10)
-function startPolling(statusUrl) {
-  stopPolling();
-
-  const controller = new AbortController();
-
-  const timer = setTimeout(() => {
-    poll(statusUrl, controller);
-  }, 1000);
-
-  setState({
-    pollingTimer: timer,
-    abortController: controller,
-  });
-}
-
-function stopPolling() {
-  const { pollingTimer, abortController } = getState();
-
-  if (pollingTimer !== null) {
-    clearTimeout(pollingTimer);
-  }
-
-  if (abortController) {
-    abortController.abort();
-  }
-
-  setState({
-    pollingTimer: null,
-    abortController: null,
-  });
-}
-
-async function poll(statusUrl, controller) {
-  // Does this request still belong to the currrent observation?
-  const isCurrent = () =>
-    getState().abortController === controller && !controller.signal.aborted;
-
-  if (!isCurrent()) return;
-
-  setState({
-    metrics: {
-      ...getState().metrics,
-      pollingCount: getState().metrics.pollingCount + 1,
-    },
-  });
-
-  try {
-    const jobData = await DataService.fetchJobStatus(
-      statusUrl,
-      controller.signal,
-    );
-
-    const responseObservedAt = Date.now();
-
-    // The user might have switched images while we waited.
-    if (!isCurrent()) return;
-
-    const activeJob = getState().activeJob;
-    const expectedJobId = activeJob?.job_id ?? activeJob?.id;
-
-    if (jobData.id !== expectedJobId) {
-      throw new Error("Status response belongs to a different job");
-    }
-
-    const mergedJob = {
-      ...jobData,
-      status_url: statusUrl,
-    };
-
-    if (jobData.status === "completed" || jobData.status === "failed") {
-  stopPolling();
-
-  setState({
-    activeJob: mergedJob,
-    variants: jobData.variants || [],
-    metrics: {
-      ...getState().metrics,
-      completionObservedAt:
-        jobData.status === "completed" ? responseObservedAt : null,
-    },
-  });
-
-  const measurement = buildMeasurement(
-    mergedJob,
-    getState().metrics,
-  );
-
-  console.table([measurement]);
-
-  return;
-}
-
-    // The job is still running. Update its display status.
-    setState({ activeJob: mergedJob });
-
-    // Only now schedule the next check.
-    const timer = setTimeout(() => {
-      poll(statusUrl, controller);
-    }, 1000);
-
-    setState({ pollingTimer: timer });
-  } catch (err) {
-    // An old or deliberately cancelled request should do nothing.
-    if (!isCurrent() || err.name === "AbortError") return;
-
-    stopPolling();
-    setState({ observationError: true });
-  }
-}
-
-// Try Again Handler (POLL-09, POLL-10)
 tryAgainBtn.addEventListener("click", () => {
   const { activeJob } = getState();
   if (activeJob?.status_url) {
     setState({ observationError: false });
-    startPolling(activeJob.status_url);
+    startObservation(activeJob.status_url);
   }
 });
+
+function freshMetrics() {
+  return {
+    requestStart: null,
+    ackLatency: null,
+    pollingCount: 0,
+    completionObservedAt: null,
+  };
+}
+
+function isTerminal(status) {
+  return status === "completed" || status === "failed";
+}
+
+function startObservation(statusUrl) {
+  stopObservation();
+
+  const generation = observationGeneration;
+  const controller = new AbortController();
+  setState({ abortController: controller, pollingTimer: null });
+  void runObservation(statusUrl, controller, generation);
+}
+
+function stopObservation() {
+  observationGeneration++;
+  const { pollingTimer, abortController } = getState();
+  if (pollingTimer !== null) clearTimeout(pollingTimer);
+  abortController?.abort();
+  setState({ pollingTimer: null, abortController: null });
+}
+
+async function runObservation(statusUrl, controller, generation) {
+  const isCurrent = () =>
+    generation === observationGeneration &&
+    getState().abortController === controller &&
+    !controller.signal.aborted;
+
+  let initialSnapshot = true;
+
+  try {
+    while (isCurrent()) {
+      const mode = getState().observationMode;
+
+      if (!initialSnapshot && mode === "short") {
+        await delay(1000, controller.signal, (timer) => {
+          if (isCurrent()) setState({ pollingTimer: timer });
+        });
+        if (!isCurrent()) return;
+        setState({ pollingTimer: null });
+      }
+
+      let requestUrl = statusUrl;
+      if (!initialSnapshot && mode === "long") {
+        const after = getState().lastObservedVersion;
+        requestUrl = `${statusUrl}?after=${encodeURIComponent(after)}&wait=20`;
+      }
+
+      setState({
+        metrics: {
+          ...getState().metrics,
+          pollingCount: getState().metrics.pollingCount + 1,
+        },
+      });
+
+      const jobData = await DataService.fetchJobStatus(
+        requestUrl,
+        controller.signal,
+        30000,
+      );
+      const responseObservedAt = Date.now();
+
+      if (!isCurrent()) return;
+
+      // 204 is a normal holding-deadline result: retain the last version and
+      // immediately issue the next long poll without attempting JSON parsing.
+      if (jobData === null) {
+        initialSnapshot = false;
+        continue;
+      }
+
+      const activeJob = getState().activeJob;
+      const expectedJobId = activeJob?.job_id ?? activeJob?.id;
+      if (jobData.id !== expectedJobId) {
+        throw new Error("Status response belongs to a different job");
+      }
+
+      const previousVersion = getState().lastObservedVersion;
+      if (previousVersion !== null && jobData.version < previousVersion) {
+        throw new Error("Status response moved to an older version");
+      }
+
+      const mergedJob = { ...jobData, status_url: statusUrl };
+      setState({
+        activeJob: mergedJob,
+        lastObservedVersion: jobData.version,
+        variants: jobData.variants || [],
+      });
+
+      initialSnapshot = false;
+      if (isTerminal(jobData.status)) {
+        const metrics = {
+          ...getState().metrics,
+          completionObservedAt:
+            jobData.status === "completed" ? responseObservedAt : null,
+        };
+        setState({ metrics });
+        console.table([buildMeasurement(mergedJob, metrics)]);
+        stopObservation();
+        return;
+      }
+    }
+  } catch (error) {
+    if (!isCurrent() || error.name === "AbortError") return;
+    stopObservation();
+    setState({ observationError: true });
+  }
+}
+
+function delay(ms, signal, onTimer) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    onTimer(timer);
+
+    function onAbort() {
+      clearTimeout(timer);
+      reject(new DOMException("Observation cancelled", "AbortError"));
+    }
+
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}

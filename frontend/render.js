@@ -95,6 +95,22 @@ emitter.on("stateChanged", (state) => {
   const jobWorkText = document.getElementById("job-work-text");
   const chooseImageBtn = document.getElementById("choose-image-btn");
   const fileInput = document.getElementById("file-input");
+  const modeLabel = document.getElementById("observation-mode-label");
+  const jobMode = document.getElementById("job-mode");
+  const jobVersion = document.getElementById("job-version");
+  const jobStage = document.getElementById("job-stage");
+  const jobProgress = document.getElementById("job-progress");
+
+  const modeText =
+    state.observationMode === "long"
+      ? "Long polling"
+      : "Short polling (every 1 second)";
+  modeLabel.textContent = modeText;
+  jobMode.textContent = modeText;
+  jobVersion.textContent = state.lastObservedVersion ?? "--";
+  jobStage.textContent =
+    state.activeJob?.stage?.replaceAll("_", " ") ?? "--";
+  jobProgress.textContent = `${state.activeJob?.variants_completed ?? 0} / 3`;
 
   // Render Immediate Upload Error Banner (VAL-05)
   if (state.uploadError) {

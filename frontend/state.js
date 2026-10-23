@@ -7,6 +7,8 @@ const state = {
   activeJob: null, // Stores status, job_id, image_id, timestamps
   uploadError: null,
   variants: [],
+  observationMode: "long",
+  lastObservedVersion: null,
   pollingTimer: null,
   abortController: null, // For cancelling fetch requests on reset
   observationError: false, // Distinguishes GET failure from job failure[cite: 1]

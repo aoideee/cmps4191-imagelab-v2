@@ -51,6 +51,22 @@
             hidden
           />
           <div id="options">
+            <fieldset class="observation-controls">
+              <legend>Observation mode</legend>
+              <label>
+                <input type="radio" name="observation-mode" value="short" />
+                Short polling
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="observation-mode"
+                  value="long"
+                  checked
+                />
+                Long polling
+              </label>
+            </fieldset>
             <div class="file-info flex-container">
               <span id="file-name">No file selected</span>
               <span id="file-meta"></span>
@@ -99,8 +115,15 @@
 
           <p id="polling-indicator" class="hidden">
             Checking status automatically<br />
-            <small>Every 1 second</small>
+            <small id="observation-mode-label">Long polling</small>
           </p>
+
+          <dl class="observation-details">
+            <div><dt>Mode</dt><dd id="job-mode">Long polling</dd></div>
+            <div><dt>Version</dt><dd id="job-version">--</dd></div>
+            <div><dt>Stage</dt><dd id="job-stage">--</dd></div>
+            <div><dt>Progress</dt><dd id="job-progress">0 / 3</dd></div>
+          </dl>
 
           <ul class="timeline">
             <li id="step-upload" class="step-item">

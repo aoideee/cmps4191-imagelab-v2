@@ -71,7 +71,7 @@ export const DataService = {
         return data;
   },
 
-  async fetchJobStatus(statusUrl, signal, timeoutMs = 5000) {
+  async fetchJobStatus(statusUrl, signal, timeoutMs = 30000) {
     const url = statusUrl.startsWith("http")
       ? statusUrl
       : `${API_BASE_URL}${statusUrl}`;
@@ -101,6 +101,10 @@ export const DataService = {
         signal: requestController.signal,
       });
 
+      if (response.status === 204) {
+        return null;
+      }
+
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         throw new Error(
@@ -118,6 +122,22 @@ export const DataService = {
 
       if (!expectedStates.includes(data.status)) {
         throw new Error("Status response contains an unexpected status");
+      }
+
+      if (!Number.isInteger(data.version) || data.version < 1) {
+        throw new Error("Status response is missing a valid version");
+      }
+
+      if (!hasText(data.stage)) {
+        throw new Error("Status response is missing a progress stage");
+      }
+
+      if (
+        !Number.isInteger(data.variants_completed) ||
+        data.variants_completed < 0 ||
+        data.variants_completed > 3
+      ) {
+        throw new Error("Status response has invalid variant progress");
       }
 
             if (data.status === "completed") {

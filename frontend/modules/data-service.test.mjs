@@ -52,6 +52,9 @@ test("a successful status response is returned normally", async (t) => {
   const expected = {
     id: "test-job",
     status: "processing",
+	version: 3,
+	stage: "thumbnail_ready",
+	variants_completed: 1,
   };
 
   t.mock.method(globalThis, "fetch", async () => ({
@@ -75,6 +78,9 @@ function completedJob() {
     id: "test-job",
     image_id: "test-image",
     status: "completed",
+	version: 5,
+	stage: "display_ready",
+	variants_completed: 3,
     variants: [
       {
         name: "thumbnail",
@@ -97,6 +103,38 @@ function completedJob() {
     ],
   };
 }
+
+test("a 204 long-poll deadline returns no snapshot", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => ({
+	status: 204,
+	ok: true,
+	json: async () => {
+	  throw new Error("204 body must not be parsed");
+	},
+  }));
+
+  const result = await DataService.fetchJobStatus(
+	"/v1/jobs/test-job?after=2&wait=20",
+  );
+
+  assert.equal(result, null);
+});
+
+test("a status response without a durable version is rejected", async (t) => {
+  const reply = completedJob();
+  delete reply.version;
+
+  t.mock.method(globalThis, "fetch", async () => ({
+	status: 200,
+	ok: true,
+	json: async () => reply,
+  }));
+
+  await assert.rejects(
+	DataService.fetchJobStatus("/v1/jobs/test-job"),
+	/missing a valid version/,
+  );
+});
 
 test("a valid completed job is returned normally", async (t) => {
   const expected = completedJob();
