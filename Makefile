@@ -1,4 +1,6 @@
-include .envrc
+# Load local database credentials when present. The file is intentionally
+# untracked, so make itself must still work before a developer creates it.
+-include .envrc
 
 # ==================================================================================== #
 # HELPERS
@@ -14,13 +16,21 @@ help:
 confirm:
 	@echo -n 'Are you sure? [y/N] ' && read ans && [ $${ans:-N} = y ]
 
+.PHONY: check/db-dsn
+check/db-dsn:
+	@if [ -z "${GATEKEEPER_DB_DSN}" ]; then \
+		echo 'GATEKEEPER_DB_DSN is not configured.'; \
+		echo 'Copy .envrc.example to .envrc, replace YOUR_PASSWORD, then retry.'; \
+		exit 1; \
+	fi
+
 # ==================================================================================== #
 # DEVELOPMENT
 # ==================================================================================== #
 
 ## run/api: run the cmd/api application
 .PHONY: run/api
-run/api:
+run/api: check/db-dsn
 	go run ./cmd/api -db-dsn=${GATEKEEPER_DB_DSN} 
 
 .PHONY: run/frontend
@@ -29,7 +39,7 @@ run/frontend:
 
 ## db/psql: connect to the database using psql
 .PHONY: db/psql
-db/psql:
+db/psql: check/db-dsn
 	psql ${GATEKEEPER_DB_DSN}
 
 ## db/migrations/new name=$1: create a new database migration
@@ -40,20 +50,20 @@ db/migrations/new:
 
 ## db/migrations/up: apply all up database migrations
 .PHONY: db/migrations/up
-db/migrations/up: confirm
+db/migrations/up: check/db-dsn confirm
 	@echo 'Running up migrations...'
 	migrate -path ./migrations -database ${GATEKEEPER_DB_DSN} up
 
 
 ## db/migrations/down: roll back the last database migration
 .PHONY: db/migrations/down
-db/migrations/down: confirm
+db/migrations/down: check/db-dsn confirm
 	@echo 'Rolling back last migration...'
 	migrate -path ./migrations -database ${GATEKEEPER_DB_DSN} down 1
 
 ## db/migrations/force version=$1: force the migration version (to fix dirty state)
 .PHONY: db/migrations/force
-db/migrations/force:
+db/migrations/force: check/db-dsn
 	@echo 'Forcing migration version to ${version}...'
 	migrate -path ./migrations -database ${GATEKEEPER_DB_DSN} force ${version}
 
