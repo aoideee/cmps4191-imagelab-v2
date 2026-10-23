@@ -118,8 +118,8 @@ func TestWorkerVariantsIntegration(t *testing.T) {
 				if workErr == nil {
 					t.Fatal("expected worker completion to report an error")
 				}
-				if count != 0 {
-					t.Fatalf("rollback left %d variant records", count)
+				if count != 2 {
+					t.Fatalf("expected two committed milestones; got %d variant records", count)
 				}
 				if savedJob.Status != "failed" ||
 					savedJob.FailedAt == nil ||
@@ -128,6 +128,9 @@ func TestWorkerVariantsIntegration(t *testing.T) {
 				}
 				if len(savedJob.Variants) != 0 {
 					t.Fatal("failed job must not advertise results")
+				}
+				if savedJob.VariantsCompleted != 2 || savedJob.Stage != "preview_ready" {
+					t.Fatal("failed job must retain its last truthful progress")
 				}
 				if savedJob.ErrorMessage == nil ||
 					*savedJob.ErrorMessage != "Failed to save generated image details" {
@@ -146,6 +149,10 @@ func TestWorkerVariantsIntegration(t *testing.T) {
 			}
 			if count != 3 || len(savedJob.Variants) != 3 {
 				t.Fatal("expected three database records and three results")
+			}
+			if savedJob.Version != 5 || savedJob.VariantsCompleted != 3 ||
+				savedJob.Stage != "display_ready" {
+				t.Fatal("expected claim and three versioned progress milestones")
 			}
 
 			for _, variant := range savedJob.Variants {

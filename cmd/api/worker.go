@@ -17,6 +17,8 @@ import (
 	"golang.org/x/image/draw"
 )
 
+var errPersistVariantProgress = errors.New("persist variant progress")
+
 func (app *application) startImageWorker(ctx context.Context) {
 	app.wg.Add(1)
 	go func() {
@@ -45,10 +47,19 @@ func (app *application) processNextImageJob(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	app.logger.Info("image processing job started", "job_id", job.PublicID)
+	app.notifyJobObservers(job.PublicID)
+	app.logger.Info(
+		"image job change committed",
+		"job_id", job.PublicID,
+		"version", job.Version,
+		"status", job.Status,
+		"stage", job.Stage,
+		"variants_completed", job.VariantsCompleted,
+		"committed_at", time.Now().UTC().Format(time.RFC3339Nano),
+	)
 
 	if job.ImageID == nil {
-		return app.models.Jobs.MarkFailed(ctx, job.ID, "Job is missing associated image record")
+		return app.failJob(ctx, job, "Job is missing associated image record")
 	}
 
 	// Artificial delay (configurable via -job-delay) to demonstrate asynchronous job transitions
@@ -65,46 +76,47 @@ func (app *application) processNextImageJob(ctx context.Context) error {
 	img, err := app.models.Images.Get(job.ImageID)
 	if err != nil {
 		app.logger.Error("failed to load image record", "error", err, "job_id", job.PublicID)
-		return app.models.Jobs.MarkFailed(ctx, job.ID, "Associated image record could not be loaded")
+		return app.failJob(ctx, job, "Associated image record could not be loaded")
 	}
 
 	// 1. Decode original file from disk
 	srcImg, format, err := loadAndDecodeImage(img)
 	if err != nil {
 		app.logger.Error("failed to load/decode image", "error", err, "job_id", job.PublicID)
-		return app.models.Jobs.MarkFailed(ctx, job.ID, "Failed to read or decode original image file")
+		return app.failJob(ctx, job, "Failed to read or decode original image file")
 	}
 
-	// 2. Generate variant images and construct metadata
-	variants, err := generateVariants(img, srcImg, format)
-	if err != nil {
-		app.logger.Error("failed to generate variants", "error", err, "job_id", job.PublicID)
-		return app.models.Jobs.MarkFailed(ctx, job.ID, "Failed to generate image variants")
-	}
-
-	// 3. Mark job complete in PostgreSQL
-	if err := app.completeJob(ctx, job, variants); err != nil {
-		app.logger.Error(
-			"failed to save completed job",
-			"error", err,
-			"job_id", job.PublicID,
-		)
-
-		// Do not overwrite a completion that may already have committed.
-		if errors.Is(err, data.ErrVariantCommitUncertain) {
+	// 2. Generate each real variant, then transactionally publish its progress.
+	_, err = generateVariantsWithProgress(img, srcImg, format, func(variant data.Variant) error {
+		progress, err := app.models.Jobs.StoreVariantProgress(ctx, job.ID, variant)
+		if err != nil {
 			return err
 		}
 
-		failErr := app.models.Jobs.MarkFailed(
-			ctx, job.ID, "Failed to save generated image details",
+		app.logger.Info(
+			"image job change committed",
+			"job_id", job.PublicID,
+			"version", progress.Version,
+			"status", progress.Status,
+			"stage", progress.Stage,
+			"variants_completed", progress.VariantsCompleted,
+			"committed_at", time.Now().UTC().Format(time.RFC3339Nano),
 		)
-		if failErr != nil {
-			return fmt.Errorf(
-				"completion failed: %v; recording failure also failed: %w",
-				err, failErr,
-			)
+		app.notifyJobObservers(job.PublicID)
+		return nil
+	})
+	if err != nil {
+		app.logger.Error("failed to generate variants", "error", err, "job_id", job.PublicID)
+		if errors.Is(err, data.ErrVariantCommitUncertain) {
+			return err
 		}
-
+		message := "Failed to generate image variants"
+		if errors.Is(err, errPersistVariantProgress) {
+			message = "Failed to save generated image details"
+		}
+		if failErr := app.failJob(ctx, job, message); failErr != nil {
+			return fmt.Errorf("processing failed: %v; recording failure also failed: %w", err, failErr)
+		}
 		return err
 	}
 
@@ -183,6 +195,15 @@ func calculateFit(srcW, srcH, maxW, maxH int) (int, int) {
 
 // generateVariants creates thumbnail, preview, and display variants satisfying IMG-01 to IMG-04.
 func generateVariants(img *data.Image, srcImg image.Image, format string) ([]data.Variant, error) {
+	return generateVariantsWithProgress(img, srcImg, format, nil)
+}
+
+func generateVariantsWithProgress(
+	img *data.Image,
+	srcImg image.Image,
+	format string,
+	onStored func(data.Variant) error,
+) ([]data.Variant, error) {
 	variantsDir := filepath.Join("./uploads", img.ID, "variants")
 	if err := os.MkdirAll(variantsDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create variants directory: %w", err)
@@ -271,14 +292,41 @@ func generateVariants(img *data.Image, srcImg image.Image, format string) ([]dat
 			Size:           fileInfo.Size(),
 			URL:            fmt.Sprintf("/v1/images/%s/variants/%s", img.ID, plan.name),
 		})
+		if onStored != nil {
+			if err := onStored(variants[len(variants)-1]); err != nil {
+				return nil, fmt.Errorf("%w for %s: %w", errPersistVariantProgress, plan.name, err)
+			}
+		}
 	}
 
 	return variants, nil
 }
 
 // completeJob saves all variant records and the completed state together.
-func (app *application) completeJob(ctx context.Context, job *data.Job, variants []data.Variant) error {
-	return app.models.Jobs.CompleteWithVariants(ctx, job.ID, variants)
+func (app *application) notifyJobObservers(publicID string) {
+	if app.observers != nil {
+		app.observers.notify(publicID)
+	}
+}
+
+func (app *application) failJob(ctx context.Context, job *data.Job, message string) error {
+	if err := app.models.Jobs.MarkFailed(ctx, job.ID, message); err != nil {
+		return err
+	}
+
+	app.notifyJobObservers(job.PublicID)
+	if snapshot, err := app.models.Jobs.GetByPublicID(job.PublicID); err == nil {
+		app.logger.Info(
+			"image job change committed",
+			"job_id", job.PublicID,
+			"version", snapshot.Version,
+			"status", snapshot.Status,
+			"stage", snapshot.Stage,
+			"variants_completed", snapshot.VariantsCompleted,
+			"committed_at", time.Now().UTC().Format(time.RFC3339Nano),
+		)
+	}
+	return nil
 }
 
 // resizeImage scales an image to width x height using bilinear interpolation.
